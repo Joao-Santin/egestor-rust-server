@@ -1,0 +1,59 @@
+mod auth;
+mod config;
+mod egestor_client;
+mod error;
+mod forward;
+mod routes;
+mod state;
+
+use std::sync::Arc;
+
+use axum::extract::DefaultBodyLimit;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+
+use crate::{config::Config, egestor_client::EgestorClient, state::AppState};
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let config = match Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("\n[CONFIG] {e}\n");
+            std::process::exit(1);
+        }
+    };
+
+    let port = config.port;
+    let base_url = config.base_url.clone();
+
+    let egestor = EgestorClient::new(config.base_url, config.personal_token);
+    let state = AppState { egestor: Arc::new(egestor) };
+
+    let app = routes::build(state)
+        // Eleva o limite padrão (2 MB) para caber uploads de foto de
+        // produto / disco virtual (spec documenta até 10 MB).
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http());
+
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .unwrap_or_else(|e| panic!("Não foi possível abrir a porta {port}: {e}"));
+
+    tracing::info!("🚀 egestor-api-server (Rust) ouvindo em http://localhost:{port}");
+    tracing::info!("   Base da API eGestor: {base_url}");
+    tracing::info!(
+        "   Exemplo: http://localhost:{port}/api/producao?dtIni=2025-01-01&dtFim=2025-01-31"
+    );
+
+    axum::serve(listener, app)
+        .await
+        .expect("erro fatal servindo requisições");
+}
